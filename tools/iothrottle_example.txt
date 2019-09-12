@@ -1,0 +1,60 @@
+Demonstrations of iothrottle, the Linux eBPF/bcc version.
+
+iothrottle traces the buffer io throttle's latency system-wide, and prints variout details.
+Example output:
+
+# ./iothrottle
+COMM  PID    TID    FNAME             COUNT  POS          BDI    DIRTIED  RATELIMIT(KBps)    PAUSED(ms)      LAT(ms)
+bio   5244   5244   bio_rrw_test.txt  32768  2427650048   259:3  8        3376                       13        13.58
+fio   5243   5243   fio_rrw_test.txt  32768  1802076160   259:3  8        6052                       13        14.67
+bio   5244   5244   bio_rrw_test.txt  32768  2427748352   259:3  8        6100                       13        13.07
+fio   5243   5243   fio_rrw_test.txt  32768  1802174464   259:3  8        6100                       13        13.84
+bio   5244   5244   bio_rrw_test.txt  32768  2427813888   259:3  8        5112                       13        13.44
+fio   5243   5243   fio_rrw_test.txt  32768  1802240000   259:3  8        2720                       13        13.81
+bio   5244   5244   bio_rrw_test.txt  32768  2427879424   259:3  8        2720                       14        13.86
+fio   5243   5243   fio_rrw_test.txt  32768  1802272768   259:3  8        2720                       14        15.24
+bio   5244   5244   bio_rrw_test.txt  32768  2427912192   259:3  8        2720                       14        14.03
+fio   5243   5243   fio_rrw_test.txt  32768  1802305536   259:3  8        2860                       14        15.94
+^C
+
+While tracing, the processes write buffer IO, when there are too many dirty pages, balance_dirty_pages will be called
+to wake up bdi writeback thread and give up cpu by io_schedule_timeout(paused), which will increase the latency of
+vfs_write.
+
+iothrottle can be useful for discovering this situation and give some judge:
+- the buffer IO's performance jitter
+- the bdi's performance
+- whether we should make /proc/sys/vm/dirty_background_ratio lower
+
+The -T option include timestamp:
+
+# ./iothrottle -T
+TIME(s)   COMM   PID    TID    FNAME             COUNT   POS         BDI    DIRTIED  RATELIMIT(KBps)    PAUSED(ms)      LAT(ms)
+0.000     bio    5244   5244   bio_rrw_test.txt  32768   517898240   259:3  32       83676                       6         5.89
+578.172   fio    5243   5243   fio_rrw_test.txt  32768   297238528   259:3  32       87020                       6         5.75
+577.912   bio    5244   5244   bio_rrw_test.txt  32768   801472512   259:3  32       88992                       6         6.00
+596.586   bio    5244   5244   bio_rrw_test.txt  32768   805601280   259:3  32       78104                       5         4.21
+597.189   fio    5243   5243   fio_rrw_test.txt  32768   301793280   259:3  32       78444                       6         5.73
+618.411   bio    5244   5244   bio_rrw_test.txt  32768   813334528   259:3  32       76816                       6         5.49
+620.128   fio    5243   5243   fio_rrw_test.txt  32768   309297152   259:3  32       79132                       6         5.84
+700.538   bio    5244   5244   bio_rrw_test.txt  32768   846430208   259:3  32       79260                       5         4.36
+700.965   fio    5243   5243   fio_rrw_test.txt  32768   339902464   259:3  32       78060                       5         5.90
+768.619   fio    5243   5243   fio_rrw_test.txt  32768   363954176   259:3  32       83716                       1         0.06
+769.439   fio    5243   5243   fio_rrw_test.txt  32768   364347392   259:3  32       81060                       5         4.87
+770.027   bio    5244   5244   bio_rrw_test.txt  32768   873234432   259:3  32       82216                       5         5.31
+807.481   bio    5244   5244   bio_rrw_test.txt  32768   886308864   259:3  32       73000                       5         4.58
+
+USAGE message:
+
+#./iothrottle -h
+usage: iothrottle.py [-h] [-T]
+
+Trace io throttle
+
+optional arguments:
+  -h, --help       show this help message and exit
+  -T, --timestamp  include timestamp on output
+
+examples:
+    ./iothrottle          # trace all io throttle
+    ./iothrottle -T       # include timestamps

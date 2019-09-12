@@ -1,7 +1,7 @@
 #!/usr/bin/python
 # @lint-avoid-python-3-compatibility-imports
 #
-# iothrottle  Trace balance_dirty_pages's io throttle's latency and print
+# iothrottle  Trace buffer io throttle's latency and print
 # details including issuing PID.
 #       For Linux, uses BCC, eBPF.
 #
