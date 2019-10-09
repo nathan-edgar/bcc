@@ -33,11 +33,11 @@ Include a timestamp column.
 .TP
 Trace all buffer io throttle events:
 #
-.B drsnoop
+.B iothrottle
 .TP
 Trace all buffer io throttle events, and include timestamps:
 #
-.B drsnoop \-T
+.B iothrottle \-T
 .SH FIELDS
 .TP
 TIME(s)
@@ -62,10 +62,10 @@ POS
 Buffer IO's pos of file
 .TP
 BDI
-Buffer IO's dbi
+Buffer IO's bdi
 .TP
 DIRTIED
-Current task's nr_dirties
+Current task's nr_dirtied
 .TP
 RATELIMIT(KBps)
 Current task's task_ratelimit
