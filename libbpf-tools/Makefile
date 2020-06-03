@@ -15,6 +15,7 @@ APPS = \
 	execsnoop \
 	filelife \
 	opensnoop \
+	mpscan \
 	runqslower \
 	syscount \
 	vfsstat \

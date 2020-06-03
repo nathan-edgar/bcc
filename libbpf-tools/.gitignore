@@ -3,6 +3,7 @@
 /drsnoop
 /execsnoop
 /filelife
+/mpscan
 /opensnoop
 /runqslower
 /syscount
