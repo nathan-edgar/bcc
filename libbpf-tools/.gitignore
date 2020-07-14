@@ -1,5 +1,6 @@
 /.output
 /biolatency
+/biosnoop
 /bitesize
 /cpudist
 /drsnoop
