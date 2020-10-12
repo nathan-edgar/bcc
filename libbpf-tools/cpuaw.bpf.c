@@ -15,9 +15,11 @@ const volatile bool targ_per_thread = false;
 const volatile bool targ_per_pidns = false;
 const volatile bool targ_ms = false;
 const volatile pid_t targ_tgid = 0;
+const volatile unsigned int sysctl_sched_migration_cost = 0;
 
 struct data_t {
 	u64 nr_failed;
+	u64 clock_task;
 	u64 ts;
 };
 
@@ -38,12 +40,13 @@ struct {
 } hists SEC(".maps");
 
 SEC("kprobe/can_migrate_task")
-int BPF_KPROBE(can_migrate_task, struct task_struct *p)
+int BPF_KPROBE(can_migrate_task, struct task_struct *p, struct lb_env *env)
 {
 	u32 pid = BPF_CORE_READ(p, pid);
 	struct data_t data;
 
 	data.nr_failed = BPF_CORE_READ(p, se.statistics.nr_failed_migrations_hot);
+	data.clock_task = BPF_CORE_READ(env, src_rq, clock_task);
 	data.ts = 0;
 
 	bpf_map_update_elem(&start, &pid, &data, 0);
@@ -51,7 +54,7 @@ int BPF_KPROBE(can_migrate_task, struct task_struct *p)
 }
 
 SEC("kretprobe/can_migrate_task")
-int BPF_KRETPROBE(can_migrate_task_ret, int ret)
+int BPF_KRETPROBE(can_migrate_task_ret)
 {
 	struct task_struct *p = (void*)bpf_get_current_task();
 	u32 pid = BPF_CORE_READ(p, pid);
@@ -62,6 +65,8 @@ int BPF_KRETPROBE(can_migrate_task_ret, int ret)
 	if (!data)
 		return 0;
 
+	bpf_printk("delta = %u, cost: %u\n", data->clock_task - sysctl_sched_migration_cost,
+		sysctl_sched_migration_cost);
 	cur_failed_nr = BPF_CORE_READ(p, se.statistics.nr_failed_migrations_hot);
 	if (cur_failed_nr - data->nr_failed != 1) {
 		bpf_printk("not hot\n");

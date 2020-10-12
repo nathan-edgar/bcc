@@ -202,6 +202,7 @@ int main(int argc, char **argv)
 	obj->rodata->targ_per_pidns = env.per_pidns;
 	obj->rodata->targ_ms = env.milliseconds;
 	obj->rodata->targ_tgid = env.pid;
+	obj->rodata->sysctl_sched_migration_cost = -1;
 
 	err = cpuaw_bpf__load(obj);
 	if (err) {
