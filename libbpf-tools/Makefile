@@ -15,6 +15,7 @@ APPS = \
 	biosnoop \
 	biostacks \
 	bitesize \
+	cpuaw \
 	cpudist \
 	drsnoop \
 	execsnoop \
