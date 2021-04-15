@@ -193,8 +193,10 @@ static void print_map(struct ksyms *ksyms, struct offcputime_bpf *obj)
 {
 	struct key_t lookup_key = {}, next_key;
 	const struct ksym *ksym;
-	__u64 *ip, delta;
-	int err, i, fd;
+	int err, i, ifd, sfd;
+	struct val_t val;
+	__u64 *ip;
+	struct syms *syms;
 
 	ip = calloc(env.perf_max_stack_depth, sizeof(*ip));
 	if (!ip) {
@@ -202,18 +204,18 @@ static void print_map(struct ksyms *ksyms, struct offcputime_bpf *obj)
 		return;
 	}
 
-	fd = bpf_map__fd(obj->maps.info);
-	while (!bpf_map_get_next_key(fd, &lookup_key, &next_key)) {
-		err = bpf_map_lookup_elem(fd, &next_key, &delta);
+	ifd = bpf_map__fd(obj->maps.info);
+	sfd = bpf_map__fd(obj->maps.stackmap);
+	while (!bpf_map_get_next_key(ifd, &lookup_key, &next_key)) {
+		err = bpf_map_lookup_elem(ifd, &next_key, &val);
 		if (err < 0) {
 			fprintf(stderr, "failed to lookup info: %d\n", err);
 			goto cleanup;
 		}
 		lookup_key = next_key;
-		if (delta == 0)
+		if (val.delta == 0)
 			continue;
-		if (bpf_map_lookup_elem(bpf_map__fd(obj->maps.stackmap),
-					&next_key.kern_stack_id, ip) != 0) {
+		if (bpf_map_lookup_elem(sfd, &next_key.kern_stack_id, ip) != 0) {
 			fprintf(stderr, "failed to get kernel stack\n");
 			goto cleanup;
 		}
@@ -221,8 +223,26 @@ static void print_map(struct ksyms *ksyms, struct offcputime_bpf *obj)
 			ksym = ksyms__map_addr(ksyms, ip[i]);
 			printf("    %s\n", ksym ? ksym->name : "Unknown");
 		}
-		printf("    %-16s %s (%d)\n", "-", next_key.comm, next_key.pid);
-		printf("        %lld\n\n", delta);
+		if (next_key.user_stack_id == -1)
+			goto skip_ustack;
+
+		if (bpf_map_lookup_elem(sfd, &next_key.user_stack_id, ip) != 0) {
+			fprintf(stderr, "failed to get user stack\n");
+			goto cleanup;
+		}
+
+		syms = syms__load(next_key.tgid);
+		if (!syms) {
+			fprintf(stderr, "failed to get syms\n");
+			goto skip_ustack;
+		}
+		for (i = 0; i < env.perf_max_stack_depth && ip[i]; i++) {
+			printf("    0x%llx\n", ip[i]);
+			syms__map_addr(syms, ip[i], false);
+		}
+skip_ustack:
+		printf("    %-16s %s (%d)\n", "-", val.comm, next_key.pid);
+		printf("        %lld\n\n", val.delta);
 	}
 
 cleanup:

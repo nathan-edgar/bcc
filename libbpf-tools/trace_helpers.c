@@ -3,18 +3,21 @@
 //
 // Based on ksyms improvements from Andrii Nakryiko, add more helpers.
 // 28-Feb-2020   Wenbo Zhang   Created this.
+#include <ctype.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/resource.h>
 #include <time.h>
+#include <limits.h>
 #include "trace_helpers.h"
+#include "uprobe_helpers.h"
 
-#define min(x, y) ({				 \
-	typeof(x) _min1 = (x);			 \
-	typeof(y) _min2 = (y);			 \
-	(void) (&_min1 == &_min2);		 \
-	_min1 < _min2 ? _min1 : _min2; })
+#define min(x, y) ({						\
+			typeof(x) _min1 = (x);			\
+			typeof(y) _min2 = (y);			\
+			(void) (&_min1 == &_min2);		\
+			_min1 < _min2 ? _min1 : _min2; })
 
 #define DISK_NAME_LEN	32
 
@@ -100,7 +103,7 @@ struct ksyms *ksyms__load(void)
 
 	while (true) {
 		ret = fscanf(f, "%lx %c %s%*[^\n]\n",
-			     &sym_addr, &sym_type, sym_name);
+			&sym_addr, &sym_type, sym_name);
 		if (ret == EOF && feof(f))
 			break;
 		if (ret != 3)
@@ -135,7 +138,7 @@ void ksyms__free(struct ksyms *ksyms)
 }
 
 const struct ksym *ksyms__map_addr(const struct ksyms *ksyms,
-				   unsigned long addr)
+				unsigned long addr)
 {
 	int start = 0, end = ksyms->syms_sz - 1, mid;
 	unsigned long sym_addr;
@@ -157,7 +160,7 @@ const struct ksym *ksyms__map_addr(const struct ksyms *ksyms,
 }
 
 const struct ksym *ksyms__get_symbol(const struct ksyms *ksyms,
-				     const char *name)
+				const char *name)
 {
 	int i;
 
@@ -169,13 +172,458 @@ const struct ksym *ksyms__get_symbol(const struct ksyms *ksyms,
 	return NULL;
 }
 
+struct load_range {
+	uint64_t start;
+	uint64_t end;
+	uint64_t file_off;
+};
+
+enum elf_type {
+	EXEC,
+	DYN,
+	PERF_MAP,
+	VDSO,
+	UNKNOWN,
+};
+
+struct dso {
+	char *name;
+	struct load_range *ranges;
+	int range_sz;
+	/* Dyn's first text section virtual addr at execution */
+	uint64_t sh_addr;
+	/* Dyn's first text section file offset */
+	uint64_t sh_offset;
+	enum elf_type type;
+
+	struct sym *syms;
+	int syms_sz;
+	int syms_cap;
+	char *strs;
+	int strs_sz;
+	int strs_cap;
+};
+
+struct map {
+	uint64_t start_addr;
+	uint64_t end_addr;
+	uint64_t file_off;
+	uint64_t dev_major;
+	uint64_t dev_minor;
+	uint64_t inode;
+};
+
+struct syms {
+	struct dso *dsos;
+	int dso_sz;
+	pid_t tgid;
+};
+
+static bool is_file_backed(const char *mapname)
+{
+#define STARTS_WITH(mapname, prefix) \
+	(!strncmp(mapname, prefix, sizeof(prefix) - 1))
+
+	return mapname[0] && !(
+		STARTS_WITH(mapname, "//anon") ||
+		STARTS_WITH(mapname, "/dev/zero") ||
+		STARTS_WITH(mapname, "/anon_hugepage") ||
+		STARTS_WITH(mapname, "[stack") ||
+		STARTS_WITH(mapname, "/SYSV") ||
+		STARTS_WITH(mapname, "[heap]") ||
+		STARTS_WITH(mapname, "[vsyscall]"));
+}
+
+static int get_elf_type(const char *path)
+{
+	GElf_Ehdr hdr;
+	void *res;
+	Elf *e;
+	int fd;
+
+	e = open_elf(path, &fd);
+	if (!e)
+		return -1;
+	res = gelf_getehdr(e, &hdr);
+	close_elf(e, fd);
+	if (!res)
+		return -1;
+	return hdr.e_type;
+}
+
+static bool is_perf_map(const char *path)
+{
+
+}
+
+static bool is_vdso(const char *path)
+{
+
+}
+
+static int get_elf_text_scn_info(const char *path, uint64_t *addr,
+				 uint64_t *offset)
+{
+	Elf_Scn *section = NULL;
+	int fd = -1, err = -1;
+	GElf_Shdr header;
+	size_t stridx;
+	Elf *e = NULL;
+	char *name;
+
+	e = open_elf(path, &fd);
+	if (!e)
+		goto err_out;
+	err = elf_getshdrstrndx(e, &stridx);
+	if (err < 0)
+		goto err_out;
+
+	err = -1;
+	while ((section = elf_nextscn(e, section)) != 0) {
+		if (!gelf_getshdr(section, &header))
+			continue;
+
+		name = elf_strptr(e, stridx, header.sh_name);
+		if (name && !strcmp(name, ".text")) {
+			*addr = (uint64_t)header.sh_addr;
+			*offset = (uint64_t)header.sh_offset;
+			err = 0;
+			break;
+		}
+	}
+
+err_out:
+	close_elf(e, fd);
+	return err;
+}
+
+static int syms__add_dso(struct syms *syms, struct map *map, const char *name)
+{
+	struct dso *dso = NULL;
+	int i, type;
+	void *tmp;
+
+	for (i = 0; i < syms->dso_sz; i++) {
+		if (!strcmp(syms->dsos[i].name, name)) {
+			dso = &syms->dsos[i];
+			break;
+		}
+	}
+
+	if (!dso) {
+		tmp = realloc(syms->dsos, (syms->dso_sz + 1) *
+			      sizeof(*syms->dsos));
+		if (!tmp)
+			return -1;
+		syms->dsos = tmp;
+		dso = &syms->dsos[syms->dso_sz++];
+		dso->name = strdup(name);
+	}
+
+	tmp = realloc(dso->ranges, (dso->range_sz + 1) * sizeof(*dso->ranges));
+	if (!tmp)
+		return -1;
+	dso->ranges = tmp;
+	dso->ranges[dso->range_sz].start = map->start_addr;
+	dso->ranges[dso->range_sz].end = map->end_addr;
+	dso->ranges[dso->range_sz].file_off = map->file_off;
+	dso->range_sz++;
+	type = get_elf_type(name);
+	if (type == ET_EXEC) {
+		dso->type = EXEC;
+	} else if (type == ET_DYN) {
+		dso->type = DYN;
+		if (get_elf_text_scn_info(name, &dso->sh_addr, &dso->sh_offset) < 0)
+			return -1;
+	} else if (is_perf_map(name)) {
+		dso->type = PERF_MAP;
+	} else if (is_vdso(name)) {
+		dso->type = VDSO;
+	} else {
+		dso->type = UNKNOWN;
+	}
+	return 0;
+}
+
+struct syms *syms__load(pid_t tgid)
+{
+	char buf[PATH_MAX], perm[5];
+	struct syms *syms;
+	char fname[128];
+
+	struct map map;
+	char *name;
+	FILE *f;
+	int ret;
+
+	syms = calloc(1, sizeof(*syms));
+	if (!syms)
+		return NULL;
+	syms->tgid = tgid;
+
+	fprintf(stderr, "tgid: %d\n", tgid);
+	snprintf(fname, sizeof(fname), "/proc/%ld/maps", (long)tgid);
+	f = fopen(fname, "r");
+	if (!f)
+		return NULL;
+
+
+	while (true) {
+		ret = fscanf(f, "%lx-%lx %4s %lx %lx:%lx %lu%[^\n]",
+			     &map.start_addr, &map.end_addr, perm,
+			     &map.file_off, &map.dev_major,
+			     &map.dev_minor, &map.inode, buf);
+		if (ret == EOF && feof(f))
+			break;
+		if (ret != 8)	/* perf-<PID>.map */
+			goto err_out;
+
+		if (perm[2] != 'x')
+			continue;
+
+		name = buf;
+		while (isspace(*name))
+			name++;
+		if (!is_file_backed(name))
+			continue;
+
+		syms__add_dso(syms, &map, name);
+	}
+
+	fclose(f);
+	return syms;
+
+err_out:
+	syms__free(syms);
+	fclose(f);
+	return NULL;
+}
+
+void syms__free(struct syms *syms)
+{
+
+}
+
+static struct dso *syms__find_dso(const struct syms *syms, unsigned long addr,
+				  uint64_t *offset)
+{
+	struct load_range *range;
+	struct dso *dso;
+	int i, j;
+
+	for (i = 0; i < syms->dso_sz; i++) {
+		dso = &syms->dsos[i];
+		for (j = 0; dso->range_sz; j++) {
+			range = &dso->ranges[j];
+			if (addr <= range->start || addr >= range->end)
+				continue;
+			if (dso->type == DYN || dso->type == VDSO) {
+				/* Offset within the mmap */
+				*offset = addr - range->start + range->file_off;
+				/* Offset within the ELF for dyn symbol lookup */
+				*offset += dso->sh_addr - dso->sh_offset;
+			} else {
+				*offset = addr;
+			}
+
+			return dso;
+		}
+	}
+
+	return NULL;
+}
+
+static int dso__load_sym_table_from_perf_map(struct dso *dso)
+{
+
+}
+
+static int dso__add_sym(struct dso *dso, const char *synname, uint64_t start,
+			uint64_t size)
+{
+	size_t new_cap, name_len = strlen(synname) + 1;
+	struct sym *sym;
+	void *tmp;
+
+	if (dso->strs_sz + name_len > dso->strs_cap) {
+		new_cap = dso->strs_cap * 4 / 3;
+		if (new_cap < dso->strs_sz + name_len)
+			new_cap = dso->strs_sz + name_len;
+		if (new_cap < 1024)
+			new_cap = 1024;
+		tmp = realloc(dso->strs, new_cap);
+		if (!tmp)
+			return -1;
+		dso->strs = tmp;
+		dso->strs_cap = new_cap;
+	}
+	if (dso->syms_sz + 1 > dso->syms_cap) {
+		new_cap = dso->syms_cap * 4 / 3;
+		if (new_cap < 1024)
+			new_cap = 1024;
+		tmp = realloc(dso->syms, sizeof(*dso->syms) * new_cap);
+		if (!tmp)
+			return -1;
+		dso->syms = tmp;
+		dso->syms_cap = new_cap;
+	}
+
+	sym = &dso->syms[dso->syms_sz];
+	/* while constructing, re-use pointer as just a plain offset */
+	sym->name = (void*)(unsigned long)dso->strs_sz;
+	sym->start = start;
+	sym->size = size;
+
+	memcpy(dso->strs + dso->strs_sz, synname, name_len);
+	dso->strs_sz += name_len;
+	dso->syms_sz++;
+
+	return 0;
+}
+
+static int sym_cmp(const void *p1, const void *p2)
+{
+	const struct sym *s1 = p1, *s2 = p2;
+
+	if (s1->start == s2->start)
+		return strcmp(s1->name, s2->name);
+	return s1->start < s2->start ? -1 : 1;
+}
+
+static int dso__add_syms(struct dso *dso, Elf *e, Elf_Scn *section,
+			 size_t stridx, size_t symsize)
+{
+	Elf_Data *data = NULL;
+	int i;
+
+	while ((data = elf_getdata(section, data)) != 0) {
+		size_t i, symcount = data->d_size / symsize;
+
+		if (data->d_size % symsize)
+			return -1;
+
+		for (i = 0; i < symcount; ++i) {
+			const char *name;
+			size_t name_len;
+			GElf_Sym sym;
+
+			if (!gelf_getsym(data, (int)i, &sym))
+				continue;
+			if ((name = elf_strptr(e, stridx, sym.st_name)) == NULL)
+				continue;
+			if (name[0] == '\0')
+				continue;
+			name_len = strlen(name);
+
+			if (sym.st_value == 0)
+				continue;
+
+			dso__add_sym(dso, name, sym.st_value, sym.st_size);
+		}
+	}
+
+	/* now when strings are finalized, adjust pointers properly */
+	for (i = 0; i < dso->syms_sz; i++)
+		dso->syms[i].name += (unsigned long)dso->strs;
+
+	qsort(dso->syms, dso->syms_sz, sizeof(*dso->syms), sym_cmp);
+
+	return 0;
+}
+
+static int dso__load_sym_table_from_elf(struct dso *dso)
+{
+	Elf_Scn *section = NULL;
+	int fd = -1;
+	Elf *e;
+
+	e = open_elf(dso->name, &fd);
+	if (!e)
+		return -1;
+
+	while ((section = elf_nextscn(e, section)) != 0) {
+		GElf_Shdr header;
+
+		if (!gelf_getshdr(section, &header))
+			continue;
+
+		if (header.sh_type != SHT_SYMTAB &&
+		    header.sh_type != SHT_DYNSYM)
+			continue;
+
+		dso__add_syms(dso, e, section, header.sh_link,
+			      header.sh_entsize);
+	}
+
+	return 0;
+}
+
+static int dso__load_sym_table_from_vdso_image(struct dso *dso)
+{
+
+}
+
+static int dso__load_sym_table(struct dso *dso)
+{
+	if (dso->type == UNKNOWN)
+		return 0;
+	if (dso->type == PERF_MAP)
+		return dso__load_sym_table_from_perf_map(dso);
+	if (dso->type == EXEC || dso->type == DYN)
+		return dso__load_sym_table_from_elf(dso);
+	if (dso->type == VDSO)
+		return dso__load_sym_table_from_vdso_image(dso);
+	return -1;
+}
+
+static struct sym *dso__find_sym(struct dso *dso, uint64_t offset)
+{
+	dso__load_sym_table(dso);
+
+	int start = 0, end = dso->syms_sz - 1, mid;
+	unsigned long sym_addr;
+
+	/* find largest sym_addr <= addr using binary search */
+	while (start < end) {
+		mid = start + (end - start + 1) / 2;
+		sym_addr = dso->syms[mid].start;
+
+		if (sym_addr <= offset)
+			start = mid;
+		else
+			end = mid - 1;
+	}
+
+	if (start == end && dso->syms[start].start <= offset)
+		return &dso->syms[start];
+	return NULL;
+}
+
+const struct sym *syms__map_addr(const struct syms *syms,
+				 unsigned long addr, bool demangle)
+{
+	struct dso *dso;
+	uint64_t offset;
+
+	dso = syms__find_dso(syms, addr, &offset);
+	if (!dso)
+		return NULL;
+	return dso__find_sym(dso, offset);
+}
+
+const struct sym *syms__get_symbol(const struct syms *syms,
+				   const char *name)
+{
+
+}
+
 struct partitions {
 	struct partition *items;
 	int sz;
 };
 
 static int partitions__add_partition(struct partitions *partitions,
-				     const char *name, unsigned int dev)
+				const char *name, unsigned int dev)
 {
 	struct partition *partition;
 	void *tmp;

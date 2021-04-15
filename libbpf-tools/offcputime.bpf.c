@@ -37,7 +37,7 @@ struct {
 struct {
 	__uint(type, BPF_MAP_TYPE_HASH);
 	__type(key, struct key_t);
-	__type(value, u64);
+	__type(value, struct val_t);
 	__uint(max_entries, MAX_ENTRIES);
 } info SEC(".maps");
 
@@ -61,21 +61,30 @@ int BPF_PROG(sched_switch, bool preempt, struct task_struct *prev,
 	     struct task_struct *next)
 {
 	struct internal_key *i_keyp, i_key;
-	s64 *deltap, delta;
+	struct val_t *valp, val;
+	s64 delta;
 	u32 pid;
 
 	if (allow_record(prev)) {
 		pid = prev->pid;
-		i_key.start_ts = bpf_ktime_get_ns();
+		/* To distinguish idle threads of different cores */
+		if (!pid)
+			pid = bpf_get_smp_processor_id();
 		i_key.key.pid = pid;
 		i_key.key.tgid = prev->tgid;
-		i_key.key.user_stack_id = -1; /* will support it later */
+		i_key.start_ts = bpf_ktime_get_ns();
+
+		if (prev->flags & PF_KTHREAD)
+			i_key.key.user_stack_id = -1;
+		else
+			i_key.key.user_stack_id =
+				bpf_get_stackid(ctx, &stackmap,
+						BPF_F_USER_STACK);
 		i_key.key.kern_stack_id = bpf_get_stackid(ctx, &stackmap, 0);
-		bpf_probe_read_str(&i_key.key.comm, sizeof(prev->comm),
-				   prev->comm);
 		bpf_map_update_elem(&start, &pid, &i_key, 0);
-		delta = 0;
-		bpf_map_update_elem(&info, &i_key.key, &delta, BPF_NOEXIST);
+		bpf_probe_read_str(&val.comm, sizeof(prev->comm), prev->comm);
+		val.delta = 0;
+		bpf_map_update_elem(&info, &i_key.key, &val, BPF_NOEXIST);
 	}
 
 	pid = next->pid;
@@ -88,10 +97,10 @@ int BPF_PROG(sched_switch, bool preempt, struct task_struct *prev,
 	delta /= 1000U;
 	if (delta < min_block_ns || delta > max_block_ns)
 		goto cleanup;
-	deltap = bpf_map_lookup_elem(&info, &i_keyp->key);
-	if (!deltap)
+	valp = bpf_map_lookup_elem(&info, &i_keyp->key);
+	if (!valp)
 		goto cleanup;
-	__sync_fetch_and_add(deltap, delta);
+	__sync_fetch_and_add(&valp->delta, delta);
 
 cleanup:
 	bpf_map_delete_elem(&start, &pid);

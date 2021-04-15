@@ -20,6 +20,22 @@ const struct ksym *ksyms__map_addr(const struct ksyms *ksyms,
 const struct ksym *ksyms__get_symbol(const struct ksyms *ksyms,
 				     const char *name);
 
+struct sym {
+	const char *name;
+	unsigned long start;
+	unsigned long size;
+};
+
+struct syms;
+
+struct syms *syms__load(int tgid);
+void syms__free(struct syms *syms);
+
+const struct sym *syms__map_addr(const struct syms *syms,
+				 unsigned long addr, bool demangle);
+const struct sym *syms__get_symbol(const struct syms *syms,
+				   const char *name);
+
 struct partition {
 	char *name;
 	unsigned int dev;
