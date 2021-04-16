@@ -317,6 +317,7 @@ static int syms__add_dso(struct syms *syms, struct map *map, const char *name)
 			return -1;
 		syms->dsos = tmp;
 		dso = &syms->dsos[syms->dso_sz++];
+		memset(dso, 0, sizeof(*dso));
 		dso->name = strdup(name);
 	}
 
@@ -361,7 +362,6 @@ struct syms *syms__load(pid_t tgid)
 		return NULL;
 	syms->tgid = tgid;
 
-	fprintf(stderr, "tgid: %d\n", tgid);
 	snprintf(fname, sizeof(fname), "/proc/%ld/maps", (long)tgid);
 	f = fopen(fname, "r");
 	if (!f)
@@ -413,7 +413,7 @@ static struct dso *syms__find_dso(const struct syms *syms, unsigned long addr,
 
 	for (i = 0; i < syms->dso_sz; i++) {
 		dso = &syms->dsos[i];
-		for (j = 0; dso->range_sz; j++) {
+		for (j = 0; j < dso->range_sz; j++) {
 			range = &dso->ranges[j];
 			if (addr <= range->start || addr >= range->end)
 				continue;
@@ -438,10 +438,10 @@ static int dso__load_sym_table_from_perf_map(struct dso *dso)
 
 }
 
-static int dso__add_sym(struct dso *dso, const char *synname, uint64_t start,
+static int dso__add_sym(struct dso *dso, const char *name, uint64_t start,
 			uint64_t size)
 {
-	size_t new_cap, name_len = strlen(synname) + 1;
+	size_t new_cap, name_len = strlen(name) + 1;
 	struct sym *sym;
 	void *tmp;
 
@@ -474,7 +474,7 @@ static int dso__add_sym(struct dso *dso, const char *synname, uint64_t start,
 	sym->start = start;
 	sym->size = size;
 
-	memcpy(dso->strs + dso->strs_sz, synname, name_len);
+	memcpy(dso->strs + dso->strs_sz, name, name_len);
 	dso->strs_sz += name_len;
 	dso->syms_sz++;
 
@@ -494,7 +494,6 @@ static int dso__add_syms(struct dso *dso, Elf *e, Elf_Scn *section,
 			 size_t stridx, size_t symsize)
 {
 	Elf_Data *data = NULL;
-	int i;
 
 	while ((data = elf_getdata(section, data)) != 0) {
 		size_t i, symcount = data->d_size / symsize;
@@ -509,7 +508,7 @@ static int dso__add_syms(struct dso *dso, Elf *e, Elf_Scn *section,
 
 			if (!gelf_getsym(data, (int)i, &sym))
 				continue;
-			if ((name = elf_strptr(e, stridx, sym.st_name)) == NULL)
+			if (!(name = elf_strptr(e, stridx, sym.st_name)))
 				continue;
 			if (name[0] == '\0')
 				continue;
@@ -518,23 +517,21 @@ static int dso__add_syms(struct dso *dso, Elf *e, Elf_Scn *section,
 			if (sym.st_value == 0)
 				continue;
 
-			dso__add_sym(dso, name, sym.st_value, sym.st_size);
+			if (dso__add_sym(dso, name, sym.st_value, sym.st_size))
+				goto err_out;
 		}
 	}
 
-	/* now when strings are finalized, adjust pointers properly */
-	for (i = 0; i < dso->syms_sz; i++)
-		dso->syms[i].name += (unsigned long)dso->strs;
-
-	qsort(dso->syms, dso->syms_sz, sizeof(*dso->syms), sym_cmp);
-
 	return 0;
+
+err_out:
+	return -1;
 }
 
 static int dso__load_sym_table_from_elf(struct dso *dso)
 {
 	Elf_Scn *section = NULL;
-	int fd = -1;
+	int i, fd = -1;
 	Elf *e;
 
 	e = open_elf(dso->name, &fd);
@@ -551,11 +548,23 @@ static int dso__load_sym_table_from_elf(struct dso *dso)
 		    header.sh_type != SHT_DYNSYM)
 			continue;
 
-		dso__add_syms(dso, e, section, header.sh_link,
-			      header.sh_entsize);
+		if (dso__add_syms(dso, e, section, header.sh_link, 
+				  header.sh_entsize))
+			goto err_out;
 	}
 
+	/* now when strings are finalized, adjust pointers properly */
+	for (i = 0; i < dso->syms_sz; i++)
+		dso->syms[i].name += (unsigned long)dso->strs;
+
+	qsort(dso->syms, dso->syms_sz, sizeof(*dso->syms), sym_cmp);
+
+	close_elf(e, fd);
 	return 0;
+
+err_out:
+	close_elf(e, fd);
+	return -1;
 }
 
 static int dso__load_sym_table_from_vdso_image(struct dso *dso)
@@ -578,10 +587,14 @@ static int dso__load_sym_table(struct dso *dso)
 
 static struct sym *dso__find_sym(struct dso *dso, uint64_t offset)
 {
-	dso__load_sym_table(dso);
-
-	int start = 0, end = dso->syms_sz - 1, mid;
 	unsigned long sym_addr;
+	int start, end, mid;
+
+	if (!dso->syms && dso__load_sym_table(dso)) 
+		return NULL;
+
+	start = 0;
+	end = dso->syms_sz - 1;
 
 	/* find largest sym_addr <= addr using binary search */
 	while (start < end) {

@@ -237,8 +237,11 @@ static void print_map(struct ksyms *ksyms, struct offcputime_bpf *obj)
 			goto skip_ustack;
 		}
 		for (i = 0; i < env.perf_max_stack_depth && ip[i]; i++) {
-			printf("    0x%llx\n", ip[i]);
-			syms__map_addr(syms, ip[i], false);
+			const struct sym *sym = syms__map_addr(syms, ip[i], false);
+			if (sym)
+				printf("    %s\n", sym->name);
+			else
+				printf("    [unknown]\n");
 		}
 skip_ustack:
 		printf("    %-16s %s (%d)\n", "-", val.comm, next_key.pid);
