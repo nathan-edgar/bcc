@@ -30,11 +30,14 @@ struct syms;
 
 struct syms *syms__load(int tgid);
 void syms__free(struct syms *syms);
+const struct sym *syms__map_addr(const struct syms *syms, unsigned long addr);
+const struct sym *syms__get_symbol(const struct syms *syms, const char *name);
 
-const struct sym *syms__map_addr(const struct syms *syms,
-				 unsigned long addr, bool demangle);
-const struct sym *syms__get_symbol(const struct syms *syms,
-				   const char *name);
+struct syms_vec;
+
+struct syms_vec *syms_vec__new(int nr);
+struct syms *syms_vec__get_syms(struct syms_vec *syms_vec, int tgid);
+void syms_vec__free(struct syms_vec *syms_vec);
 
 struct partition {
 	char *name;

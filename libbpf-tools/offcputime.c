@@ -189,11 +189,13 @@ static void sig_handler(int sig)
 {
 }
 
-static void print_map(struct ksyms *ksyms, struct offcputime_bpf *obj)
+
+static void print_map(struct ksyms *ksyms, struct syms_vec *syms_vec,
+		      struct offcputime_bpf *obj)
 {
 	struct key_t lookup_key = {}, next_key;
-	struct syms *syms = NULL;
 	const struct ksym *ksym;
+	const struct syms *syms;
 	const struct sym *sym;
 	int err, i, ifd, sfd;
 	struct val_t val;
@@ -232,7 +234,7 @@ static void print_map(struct ksyms *ksyms, struct offcputime_bpf *obj)
 			goto cleanup;
 		}
 
-		syms = syms__load(next_key.tgid);
+		syms = syms_vec__get_syms(syms_vec, next_key.tgid);
 		if (!syms) {
 			fprintf(stderr, "failed to get syms\n");
 			goto skip_ustack;
@@ -250,8 +252,6 @@ skip_ustack:
 	}
 
 cleanup:
-	if (syms)
-		syms__free(syms);
 	free(ip);
 }
 
@@ -262,6 +262,7 @@ int main(int argc, char **argv)
 		.parser = parse_arg,
 		.doc = argp_program_doc,
 	};
+	struct syms_vec *syms_vec = NULL;
 	struct ksyms *ksyms = NULL;
 	struct offcputime_bpf *obj;
 	int err;
@@ -317,6 +318,11 @@ int main(int argc, char **argv)
 		fprintf(stderr, "failed to load kallsyms\n");
 		goto cleanup;
 	}
+	syms_vec = syms_vec__new(0);
+	if (!syms_vec) {
+		fprintf(stderr, "failed to create syms_vec\n");
+		goto cleanup;
+	}
 	err = offcputime_bpf__attach(obj);
 	if (err) {
 		fprintf(stderr, "failed to attach BPF programs\n");
@@ -331,10 +337,11 @@ int main(int argc, char **argv)
 	 */
 	sleep(env.duration);
 
-	print_map(ksyms, obj);
+	print_map(ksyms, syms_vec, obj);
 
 cleanup:
 	offcputime_bpf__destroy(obj);
+	syms_vec__free(syms_vec);
 	ksyms__free(ksyms);
 	return err != 0;
 }

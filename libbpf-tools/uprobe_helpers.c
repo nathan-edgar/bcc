@@ -169,10 +169,8 @@ Elf *open_elf(const char *path, int *fd_close)
 		return NULL;
 	}
 	fd = open(path, O_RDONLY);
-	if (fd < 0) {
-		warn("Could not open %s\n", path);
+	if (fd < 0)
 		return NULL;
-	}
 	e = elf_begin(fd, ELF_C_READ, NULL);
 	if (!e) {
 		warn("elf_begin failed: %s\n", elf_errmsg(-1));

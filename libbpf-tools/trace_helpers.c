@@ -445,7 +445,6 @@ static int dso__add_syms(struct dso *dso, Elf *e, Elf_Scn *section,
 
 		for (i = 0; i < symcount; ++i) {
 			const char *name;
-			size_t name_len;
 			GElf_Sym sym;
 
 			if (!gelf_getsym(data, (int)i, &sym))
@@ -454,7 +453,6 @@ static int dso__add_syms(struct dso *dso, Elf *e, Elf_Scn *section,
 				continue;
 			if (name[0] == '\0')
 				continue;
-			name_len = strlen(name);
 
 			if (sym.st_value == 0)
 				continue;
@@ -470,7 +468,7 @@ err_out:
 	return -1;
 }
 
-static void dso__free(struct dso *dso)
+static void dso__free_fields(struct dso *dso)
 {
 	if (!dso)
 		return;
@@ -479,8 +477,6 @@ static void dso__free(struct dso *dso)
 	free(dso->ranges);
 	free(dso->syms);
 	free(dso->strs);
-	free(dso);
-	dso = NULL;
 }
 
 static int dso__load_sym_table_from_elf(struct dso *dso)
@@ -518,7 +514,7 @@ static int dso__load_sym_table_from_elf(struct dso *dso)
 	return 0;
 
 err_out:
-	dso__free(dso);
+	dso__free_fields(dso);
 	close_elf(e, fd);
 	return -1;
 }
@@ -579,16 +575,15 @@ struct syms *syms__load(pid_t tgid)
 	FILE *f;
 	int ret;
 
-	syms = calloc(1, sizeof(*syms));
-	if (!syms)
-		return NULL;
-	syms->tgid = tgid;
-
 	snprintf(fname, sizeof(fname), "/proc/%ld/maps", (long)tgid);
 	f = fopen(fname, "r");
 	if (!f)
 		return NULL;
 
+	syms = calloc(1, sizeof(*syms));
+	if (!syms)
+		goto err_out;
+	syms->tgid = tgid;
 
 	while (true) {
 		ret = fscanf(f, "%lx-%lx %4s %lx %lx:%lx %lu%[^\n]",
@@ -630,11 +625,12 @@ void syms__free(struct syms *syms)
 		return;
 
 	for (i = 0; i < syms->dso_sz; i++)
-		dso__free(&syms->dsos[i]);
+		dso__free_fields(&syms->dsos[i]);
+	free(syms->dsos);
+	free(syms);
 }
 
-const struct sym *syms__map_addr(const struct syms *syms,
-				 unsigned long addr, bool demangle)
+const struct sym *syms__map_addr(const struct syms *syms, unsigned long addr)
 {
 	struct dso *dso;
 	uint64_t offset;
@@ -649,6 +645,59 @@ const struct sym *syms__get_symbol(const struct syms *syms,
 				   const char *name)
 {
 	return NULL;
+}
+
+struct syms_vec {
+	struct {
+		struct syms *syms;
+		int tgid;
+	} *data;
+	int nr;
+};
+
+struct syms_vec *syms_vec__new(int nr)
+{
+	struct syms_vec *syms_vec;
+
+	syms_vec = calloc(1, sizeof(*syms_vec));
+	if (!syms_vec)
+		return NULL;
+	if (nr > 0)
+		syms_vec->data = calloc(nr, sizeof(*syms_vec->data));
+	return syms_vec;
+}
+
+void syms_vec__free(struct syms_vec *syms_vec)
+{
+	int i;
+
+	if (!syms_vec)
+		return;
+
+	for (i = 0; i < syms_vec->nr; i++)
+		syms__free(syms_vec->data[i].syms);
+	free(syms_vec->data);
+	free(syms_vec);
+}
+
+struct syms *syms_vec__get_syms(struct syms_vec *syms_vec, int tgid)
+{
+	void *tmp;
+	int i;
+
+	for (i = 0; i < syms_vec->nr; i++) {
+		if (syms_vec->data[i].tgid == tgid)
+			return syms_vec->data[i].syms;
+	}
+
+	tmp = realloc(syms_vec->data, (syms_vec->nr + 1) *
+		      sizeof(*syms_vec->data));
+	if (!tmp)
+		return NULL;
+	syms_vec->data = tmp;
+	syms_vec->data[syms_vec->nr].syms = syms__load(tgid);
+	syms_vec->data[syms_vec->nr].tgid = tgid;
+	return syms_vec->data[syms_vec->nr++].syms;
 }
 
 struct partitions {
