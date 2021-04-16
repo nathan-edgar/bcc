@@ -258,7 +258,7 @@ static bool is_perf_map(const char *path)
 
 static bool is_vdso(const char *path)
 {
-	return false;
+	return !strcmp(path, "[vdso]");
 }
 
 static int get_elf_text_scn_info(const char *path, uint64_t *addr,
