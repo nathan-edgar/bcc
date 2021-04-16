@@ -192,11 +192,12 @@ static void sig_handler(int sig)
 static void print_map(struct ksyms *ksyms, struct offcputime_bpf *obj)
 {
 	struct key_t lookup_key = {}, next_key;
+	struct syms *syms = NULL;
 	const struct ksym *ksym;
+	const struct sym *sym;
 	int err, i, ifd, sfd;
 	struct val_t val;
 	__u64 *ip;
-	struct syms *syms;
 
 	ip = calloc(env.perf_max_stack_depth, sizeof(*ip));
 	if (!ip) {
@@ -237,7 +238,7 @@ static void print_map(struct ksyms *ksyms, struct offcputime_bpf *obj)
 			goto skip_ustack;
 		}
 		for (i = 0; i < env.perf_max_stack_depth && ip[i]; i++) {
-			const struct sym *sym = syms__map_addr(syms, ip[i], false);
+			sym = syms__map_addr(syms, ip[i], false);
 			if (sym)
 				printf("    %s\n", sym->name);
 			else
@@ -249,6 +250,8 @@ skip_ustack:
 	}
 
 cleanup:
+	if (syms)
+		syms__free(syms);
 	free(ip);
 }
 

@@ -253,12 +253,12 @@ static int get_elf_type(const char *path)
 
 static bool is_perf_map(const char *path)
 {
-
+	return false;
 }
 
 static bool is_vdso(const char *path)
 {
-
+	return false;
 }
 
 static int get_elf_text_scn_info(const char *path, uint64_t *addr,
@@ -346,64 +346,6 @@ static int syms__add_dso(struct syms *syms, struct map *map, const char *name)
 	return 0;
 }
 
-struct syms *syms__load(pid_t tgid)
-{
-	char buf[PATH_MAX], perm[5];
-	struct syms *syms;
-	char fname[128];
-
-	struct map map;
-	char *name;
-	FILE *f;
-	int ret;
-
-	syms = calloc(1, sizeof(*syms));
-	if (!syms)
-		return NULL;
-	syms->tgid = tgid;
-
-	snprintf(fname, sizeof(fname), "/proc/%ld/maps", (long)tgid);
-	f = fopen(fname, "r");
-	if (!f)
-		return NULL;
-
-
-	while (true) {
-		ret = fscanf(f, "%lx-%lx %4s %lx %lx:%lx %lu%[^\n]",
-			     &map.start_addr, &map.end_addr, perm,
-			     &map.file_off, &map.dev_major,
-			     &map.dev_minor, &map.inode, buf);
-		if (ret == EOF && feof(f))
-			break;
-		if (ret != 8)	/* perf-<PID>.map */
-			goto err_out;
-
-		if (perm[2] != 'x')
-			continue;
-
-		name = buf;
-		while (isspace(*name))
-			name++;
-		if (!is_file_backed(name))
-			continue;
-
-		syms__add_dso(syms, &map, name);
-	}
-
-	fclose(f);
-	return syms;
-
-err_out:
-	syms__free(syms);
-	fclose(f);
-	return NULL;
-}
-
-void syms__free(struct syms *syms)
-{
-
-}
-
 static struct dso *syms__find_dso(const struct syms *syms, unsigned long addr,
 				  uint64_t *offset)
 {
@@ -435,7 +377,7 @@ static struct dso *syms__find_dso(const struct syms *syms, unsigned long addr,
 
 static int dso__load_sym_table_from_perf_map(struct dso *dso)
 {
-
+	return -1;
 }
 
 static int dso__add_sym(struct dso *dso, const char *name, uint64_t start,
@@ -528,6 +470,19 @@ err_out:
 	return -1;
 }
 
+static void dso__free(struct dso *dso)
+{
+	if (!dso)
+		return;
+
+	free(dso->name);
+	free(dso->ranges);
+	free(dso->syms);
+	free(dso->strs);
+	free(dso);
+	dso = NULL;
+}
+
 static int dso__load_sym_table_from_elf(struct dso *dso)
 {
 	Elf_Scn *section = NULL;
@@ -548,7 +503,7 @@ static int dso__load_sym_table_from_elf(struct dso *dso)
 		    header.sh_type != SHT_DYNSYM)
 			continue;
 
-		if (dso__add_syms(dso, e, section, header.sh_link, 
+		if (dso__add_syms(dso, e, section, header.sh_link,
 				  header.sh_entsize))
 			goto err_out;
 	}
@@ -563,19 +518,20 @@ static int dso__load_sym_table_from_elf(struct dso *dso)
 	return 0;
 
 err_out:
+	dso__free(dso);
 	close_elf(e, fd);
 	return -1;
 }
 
 static int dso__load_sym_table_from_vdso_image(struct dso *dso)
 {
-
+	return -1;
 }
 
 static int dso__load_sym_table(struct dso *dso)
 {
 	if (dso->type == UNKNOWN)
-		return 0;
+		return -1;
 	if (dso->type == PERF_MAP)
 		return dso__load_sym_table_from_perf_map(dso);
 	if (dso->type == EXEC || dso->type == DYN)
@@ -590,7 +546,7 @@ static struct sym *dso__find_sym(struct dso *dso, uint64_t offset)
 	unsigned long sym_addr;
 	int start, end, mid;
 
-	if (!dso->syms && dso__load_sym_table(dso)) 
+	if (!dso->syms && dso__load_sym_table(dso))
 		return NULL;
 
 	start = 0;
@@ -612,6 +568,71 @@ static struct sym *dso__find_sym(struct dso *dso, uint64_t offset)
 	return NULL;
 }
 
+struct syms *syms__load(pid_t tgid)
+{
+	char buf[PATH_MAX], perm[5];
+	struct syms *syms;
+	char fname[128];
+
+	struct map map;
+	char *name;
+	FILE *f;
+	int ret;
+
+	syms = calloc(1, sizeof(*syms));
+	if (!syms)
+		return NULL;
+	syms->tgid = tgid;
+
+	snprintf(fname, sizeof(fname), "/proc/%ld/maps", (long)tgid);
+	f = fopen(fname, "r");
+	if (!f)
+		return NULL;
+
+
+	while (true) {
+		ret = fscanf(f, "%lx-%lx %4s %lx %lx:%lx %lu%[^\n]",
+			     &map.start_addr, &map.end_addr, perm,
+			     &map.file_off, &map.dev_major,
+			     &map.dev_minor, &map.inode, buf);
+		if (ret == EOF && feof(f))
+			break;
+		if (ret != 8)	/* perf-<PID>.map */
+			goto err_out;
+
+		if (perm[2] != 'x')
+			continue;
+
+		name = buf;
+		while (isspace(*name))
+			name++;
+		if (!is_file_backed(name))
+			continue;
+
+		if (syms__add_dso(syms, &map, name))
+			goto err_out;
+	}
+
+	fclose(f);
+	return syms;
+
+err_out:
+	syms__free(syms);
+	fclose(f);
+	return NULL;
+}
+
+void syms__free(struct syms *syms)
+{
+	int i;
+
+	if (!syms)
+		return;
+
+	for (i = 0; i < syms->dso_sz; i++)
+		dso__free(&syms->dsos[i]);
+}
+
 const struct sym *syms__map_addr(const struct syms *syms,
 				 unsigned long addr, bool demangle)
 {
@@ -627,7 +648,7 @@ const struct sym *syms__map_addr(const struct syms *syms,
 const struct sym *syms__get_symbol(const struct syms *syms,
 				   const char *name)
 {
-
+	return NULL;
 }
 
 struct partitions {
