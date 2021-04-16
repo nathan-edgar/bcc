@@ -159,7 +159,7 @@ int resolve_binary_path(const char *binary, pid_t pid, char *path, size_t path_s
  * Opens an elf at `path` of kind ELF_K_ELF.  Returns NULL on failure.  On
  * success, close with close_elf(e, fd_close).
  */
-static Elf *open_elf(const char *path, int *fd_close)
+Elf *open_elf(const char *path, int *fd_close)
 {
 	int fd;
 	Elf *e;
@@ -169,10 +169,8 @@ static Elf *open_elf(const char *path, int *fd_close)
 		return NULL;
 	}
 	fd = open(path, O_RDONLY);
-	if (fd < 0) {
-		warn("Could not open %s\n", path);
+	if (fd < 0)
 		return NULL;
-	}
 	e = elf_begin(fd, ELF_C_READ, NULL);
 	if (!e) {
 		warn("elf_begin failed: %s\n", elf_errmsg(-1));
@@ -189,7 +187,7 @@ static Elf *open_elf(const char *path, int *fd_close)
 	return e;
 }
 
-static void close_elf(Elf *e, int fd_close)
+void close_elf(Elf *e, int fd_close)
 {
 	elf_end(e);
 	close(fd_close);
