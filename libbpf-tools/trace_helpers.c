@@ -3,10 +3,13 @@
 //
 // Based on ksyms improvements from Andrii Nakryiko, add more helpers.
 // 28-Feb-2020   Wenbo Zhang   Created this.
+#define _GNU_SOURCE
 #include <ctype.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <errno.h>
+#include <fcntl.h>
 #include <sys/resource.h>
 #include <time.h>
 #include <limits.h>
@@ -479,13 +482,13 @@ static void dso__free_fields(struct dso *dso)
 	free(dso->strs);
 }
 
-static int dso__load_sym_table_from_elf(struct dso *dso)
+static int dso__load_sym_table_from_elf(struct dso *dso, int fd)
 {
 	Elf_Scn *section = NULL;
-	int i, fd = -1;
 	Elf *e;
+	int i;
 
-	e = open_elf(dso->name, &fd);
+	e = fd > 0 ? open_elf_by_fd(fd) : open_elf(dso->name, &fd);
 	if (!e)
 		return -1;
 
@@ -519,9 +522,79 @@ err_out:
 	return -1;
 }
 
+static int create_tmp_vdso_image(struct dso *dso)
+{
+	uint64_t start_addr, end_addr;
+	long pid = getpid();
+	char buf[PATH_MAX];
+	void *image = NULL;
+	char tmpfile[128];
+	int ret, fd = -1;
+	uint64_t sz;
+	char *name;
+	FILE *f;
+
+	snprintf(tmpfile, sizeof(tmpfile), "/proc/%ld/maps", pid);
+	f = fopen(tmpfile, "r");
+	if (!f)
+		return -1;
+
+	while (true) {
+		ret = fscanf(f, "%lx-%lx %*s %*x %*x:%*x %*u%[^\n]",
+			     &start_addr, &end_addr, buf);
+		if (ret == EOF && feof(f))
+			break;
+		if (ret != 3)
+			goto err_out;
+
+		name = buf;
+		while (isspace(*name))
+			name++;
+		if (!is_file_backed(name))
+			continue;
+		if (is_vdso(name))
+			break;
+	}
+
+	sz = end_addr - start_addr;
+	image = malloc(sz);
+	if (!image)
+		goto err_out;
+	memcpy(image, (void *)start_addr, sz);
+
+	snprintf(tmpfile, sizeof(tmpfile),
+		 "/tmp/libbpf_%ld_vdso_image_XXXXXX", pid);
+	fd = mkostemp(tmpfile, O_CLOEXEC);
+	if (fd < 0) {
+		fprintf(stderr, "failed to create temp file: %s\n",
+			strerror(errno));
+		goto err_out;
+	}
+	/* Unlink the file to avoid leaking */
+	if (unlink(tmpfile) == -1)
+		fprintf(stderr, "failed to unlink %s: %s\n", tmpfile,
+			strerror(errno));
+	if (write(fd, image, sz) == -1) {
+		fprintf(stderr, "failed to write to vDSO image: %s\n",
+			strerror(errno));
+		close(fd);
+		fd = -1;
+		goto err_out;
+	}
+
+err_out:
+	fclose(f);
+	free(image);
+	return fd;
+}
+
 static int dso__load_sym_table_from_vdso_image(struct dso *dso)
 {
-	return -1;
+	int fd = create_tmp_vdso_image(dso);
+
+	if (fd < 0)
+		return -1;
+	return dso__load_sym_table_from_elf(dso, fd);
 }
 
 static int dso__load_sym_table(struct dso *dso)
@@ -531,7 +604,7 @@ static int dso__load_sym_table(struct dso *dso)
 	if (dso->type == PERF_MAP)
 		return dso__load_sym_table_from_perf_map(dso);
 	if (dso->type == EXEC || dso->type == DYN)
-		return dso__load_sym_table_from_elf(dso);
+		return dso__load_sym_table_from_elf(dso, 0);
 	if (dso->type == VDSO)
 		return dso__load_sym_table_from_vdso_image(dso);
 	return -1;
