@@ -15,6 +15,7 @@
 #include <limits.h>
 #include "trace_helpers.h"
 #include "uprobe_helpers.h"
+#include "strset.h"
 
 #define min(x, y) ({				\
 	typeof(x) _min1 = (x);			\
@@ -189,6 +190,8 @@ enum elf_type {
 	UNKNOWN,
 };
 
+#define MAX_STR_OFFSET 0x7fffffffU
+
 struct dso {
 	char *name;
 	struct load_range *ranges;
@@ -202,9 +205,7 @@ struct dso {
 	struct sym *syms;
 	int syms_sz;
 	int syms_cap;
-	char *strs;
-	int strs_sz;
-	int strs_cap;
+	struct strset *strs_set;
 };
 
 struct map {
@@ -219,7 +220,6 @@ struct map {
 struct syms {
 	struct dso *dsos;
 	int dso_sz;
-	pid_t tgid;
 };
 
 static bool is_file_backed(const char *mapname)
@@ -322,6 +322,7 @@ static int syms__add_dso(struct syms *syms, struct map *map, const char *name)
 		dso = &syms->dsos[syms->dso_sz++];
 		memset(dso, 0, sizeof(*dso));
 		dso->name = strdup(name);
+		dso->strs_set = strset__new(MAX_STR_OFFSET, NULL, 0);
 	}
 
 	tmp = realloc(dso->ranges, (dso->range_sz + 1) * sizeof(*dso->ranges));
@@ -386,22 +387,15 @@ static int dso__load_sym_table_from_perf_map(struct dso *dso)
 static int dso__add_sym(struct dso *dso, const char *name, uint64_t start,
 			uint64_t size)
 {
-	size_t new_cap, name_len = strlen(name) + 1;
 	struct sym *sym;
+	size_t new_cap;
 	void *tmp;
+	int off;
 
-	if (dso->strs_sz + name_len > dso->strs_cap) {
-		new_cap = dso->strs_cap * 4 / 3;
-		if (new_cap < dso->strs_sz + name_len)
-			new_cap = dso->strs_sz + name_len;
-		if (new_cap < 1024)
-			new_cap = 1024;
-		tmp = realloc(dso->strs, new_cap);
-		if (!tmp)
-			return -1;
-		dso->strs = tmp;
-		dso->strs_cap = new_cap;
-	}
+	off = strset__add_str(dso->strs_set, name);
+	if (off < 0)
+		return off;
+
 	if (dso->syms_sz + 1 > dso->syms_cap) {
 		new_cap = dso->syms_cap * 4 / 3;
 		if (new_cap < 1024)
@@ -415,13 +409,9 @@ static int dso__add_sym(struct dso *dso, const char *name, uint64_t start,
 
 	sym = &dso->syms[dso->syms_sz];
 	/* while constructing, re-use pointer as just a plain offset */
-	sym->name = (void*)(unsigned long)dso->strs_sz;
+	sym->name = (void*)(unsigned long)off;
 	sym->start = start;
 	sym->size = size;
-
-	memcpy(dso->strs + dso->strs_sz, name, name_len);
-	dso->strs_sz += name_len;
-	dso->syms_sz++;
 
 	return 0;
 }
@@ -479,7 +469,8 @@ static void dso__free_fields(struct dso *dso)
 	free(dso->name);
 	free(dso->ranges);
 	free(dso->syms);
-	free(dso->strs);
+	strset__free(dso->strs_set);
+
 }
 
 static int dso__load_sym_table_from_elf(struct dso *dso, int fd)
@@ -509,7 +500,7 @@ static int dso__load_sym_table_from_elf(struct dso *dso, int fd)
 
 	/* now when strings are finalized, adjust pointers properly */
 	for (i = 0; i < dso->syms_sz; i++)
-		dso->syms[i].name += (unsigned long)dso->strs;
+		dso->syms[i].name += (unsigned long)strset__data(dso->strs_set);
 
 	qsort(dso->syms, dso->syms_sz, sizeof(*dso->syms), sym_cmp);
 
@@ -637,18 +628,15 @@ static struct sym *dso__find_sym(struct dso *dso, uint64_t offset)
 	return NULL;
 }
 
-struct syms *syms__load(pid_t tgid)
+struct syms *syms__load_file(const char *fname)
 {
 	char buf[PATH_MAX], perm[5];
 	struct syms *syms;
-	char fname[128];
-
 	struct map map;
 	char *name;
 	FILE *f;
 	int ret;
 
-	snprintf(fname, sizeof(fname), "/proc/%ld/maps", (long)tgid);
 	f = fopen(fname, "r");
 	if (!f)
 		return NULL;
@@ -656,7 +644,6 @@ struct syms *syms__load(pid_t tgid)
 	syms = calloc(1, sizeof(*syms));
 	if (!syms)
 		goto err_out;
-	syms->tgid = tgid;
 
 	while (true) {
 		ret = fscanf(f, "%lx-%lx %4s %lx %lx:%lx %lu%[^\n]",
@@ -690,6 +677,14 @@ err_out:
 	return NULL;
 }
 
+struct syms *syms__load_pid(pid_t tgid)
+{
+	char fname[128];
+
+	snprintf(fname, sizeof(fname), "/proc/%ld/maps", (long)tgid);
+	return syms__load_file(fname);
+}
+
 void syms__free(struct syms *syms)
 {
 	int i;
@@ -714,13 +709,7 @@ const struct sym *syms__map_addr(const struct syms *syms, unsigned long addr)
 	return dso__find_sym(dso, offset);
 }
 
-const struct sym *syms__get_symbol(const struct syms *syms,
-				   const char *name)
-{
-	return NULL;
-}
-
-struct syms_vec {
+struct syms_cache {
 	struct {
 		struct syms *syms;
 		int tgid;
@@ -728,49 +717,49 @@ struct syms_vec {
 	int nr;
 };
 
-struct syms_vec *syms_vec__new(int nr)
+struct syms_cache *syms_cache__new(int nr)
 {
-	struct syms_vec *syms_vec;
+	struct syms_cache *syms_cache;
 
-	syms_vec = calloc(1, sizeof(*syms_vec));
-	if (!syms_vec)
+	syms_cache = calloc(1, sizeof(*syms_cache));
+	if (!syms_cache)
 		return NULL;
 	if (nr > 0)
-		syms_vec->data = calloc(nr, sizeof(*syms_vec->data));
-	return syms_vec;
+		syms_cache->data = calloc(nr, sizeof(*syms_cache->data));
+	return syms_cache;
 }
 
-void syms_vec__free(struct syms_vec *syms_vec)
+void syms_cache__free(struct syms_cache *syms_cache)
 {
 	int i;
 
-	if (!syms_vec)
+	if (!syms_cache)
 		return;
 
-	for (i = 0; i < syms_vec->nr; i++)
-		syms__free(syms_vec->data[i].syms);
-	free(syms_vec->data);
-	free(syms_vec);
+	for (i = 0; i < syms_cache->nr; i++)
+		syms__free(syms_cache->data[i].syms);
+	free(syms_cache->data);
+	free(syms_cache);
 }
 
-struct syms *syms_vec__get_syms(struct syms_vec *syms_vec, int tgid)
+struct syms *syms_cache__get_syms(struct syms_cache *syms_cache, int tgid)
 {
 	void *tmp;
 	int i;
 
-	for (i = 0; i < syms_vec->nr; i++) {
-		if (syms_vec->data[i].tgid == tgid)
-			return syms_vec->data[i].syms;
+	for (i = 0; i < syms_cache->nr; i++) {
+		if (syms_cache->data[i].tgid == tgid)
+			return syms_cache->data[i].syms;
 	}
 
-	tmp = realloc(syms_vec->data, (syms_vec->nr + 1) *
-		      sizeof(*syms_vec->data));
+	tmp = realloc(syms_cache->data, (syms_cache->nr + 1) *
+		      sizeof(*syms_cache->data));
 	if (!tmp)
 		return NULL;
-	syms_vec->data = tmp;
-	syms_vec->data[syms_vec->nr].syms = syms__load(tgid);
-	syms_vec->data[syms_vec->nr].tgid = tgid;
-	return syms_vec->data[syms_vec->nr++].syms;
+	syms_cache->data = tmp;
+	syms_cache->data[syms_cache->nr].syms = syms__load_pid(tgid);
+	syms_cache->data[syms_cache->nr].tgid = tgid;
+	return syms_cache->data[syms_cache->nr++].syms;
 }
 
 struct partitions {

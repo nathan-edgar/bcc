@@ -28,16 +28,16 @@ struct sym {
 
 struct syms;
 
-struct syms *syms__load(int tgid);
+struct syms *syms__load_pid(int tgid);
+struct syms *syms__load_file(const char *fname);
 void syms__free(struct syms *syms);
 const struct sym *syms__map_addr(const struct syms *syms, unsigned long addr);
-const struct sym *syms__get_symbol(const struct syms *syms, const char *name);
 
-struct syms_vec;
+struct syms_cache;
 
-struct syms_vec *syms_vec__new(int nr);
-struct syms *syms_vec__get_syms(struct syms_vec *syms_vec, int tgid);
-void syms_vec__free(struct syms_vec *syms_vec);
+struct syms_cache *syms_cache__new(int nr);
+struct syms *syms_cache__get_syms(struct syms_cache *syms_cache, int tgid);
+void syms_cache__free(struct syms_cache *syms_cache);
 
 struct partition {
 	char *name;

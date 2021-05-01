@@ -71,8 +71,7 @@ static const struct argp_option opts[] = {
 	{ "kernel-threads-only", 'k', NULL, 0,
 	  "Kernel threads only (no user threads)" },
 	{ "perf-max-stack-depth", OPT_PERF_MAX_STACK_DEPTH,
-	  "PERF-MAX-STACK-DEPTH", 0, "the limit for both kernel and user "
-	  "frames (deault 127)" },
+	  "PERF-MAX-STACK-DEPTH", 0, "the limit for both kernel and user stack traces (default 127)" },
 	{ "stack-storage-size", OPT_STACK_STORAGE_SIZE, "STACK-STORAGE-SIZE", 0,
 	  "the number of unique stack traces that can be stored and "
 	  "displayed (default 1024)" },
@@ -189,8 +188,7 @@ static void sig_handler(int sig)
 {
 }
 
-
-static void print_map(struct ksyms *ksyms, struct syms_vec *syms_vec,
+static void print_map(struct ksyms *ksyms, struct syms_cache *syms_cache,
 		      struct offcputime_bpf *obj)
 {
 	struct key_t lookup_key = {}, next_key;
@@ -236,7 +234,7 @@ print_ustack:
 			continue;
 		}
 
-		syms = syms_vec__get_syms(syms_vec, next_key.tgid);
+		syms = syms_cache__get_syms(syms_cache, next_key.tgid);
 		if (!syms) {
 			fprintf(stderr, "failed to get syms\n");
 			goto skip_ustack;
@@ -265,7 +263,7 @@ int main(int argc, char **argv)
 		.parser = parse_arg,
 		.doc = argp_program_doc,
 	};
-	struct syms_vec *syms_vec = NULL;
+	struct syms_cache *syms_cache = NULL;
 	struct ksyms *ksyms = NULL;
 	struct offcputime_bpf *obj;
 	int err;
@@ -274,13 +272,11 @@ int main(int argc, char **argv)
 	if (err)
 		return err;
 	if (env.user_threads_only && env.kernel_threads_only) {
-		fprintf(stderr, "user_threads_only, kernel_threads_only "
-			"cann't be used together.\n");
+		fprintf(stderr, "user_threads_only, kernel_threads_only cann't be used together.\n");
 		return 1;
 	}
 	if (env.min_block_time >= env.max_block_time) {
-		fprintf(stderr, "min_block_time should smaller than "
-			"max_block_time\n");
+		fprintf(stderr, "min_block_time should smaller than max_block_time\n");
 		return 1;
 	}
 
@@ -321,9 +317,9 @@ int main(int argc, char **argv)
 		fprintf(stderr, "failed to load kallsyms\n");
 		goto cleanup;
 	}
-	syms_vec = syms_vec__new(0);
-	if (!syms_vec) {
-		fprintf(stderr, "failed to create syms_vec\n");
+	syms_cache = syms_cache__new(0);
+	if (!syms_cache) {
+		fprintf(stderr, "failed to create syms_cache\n");
 		goto cleanup;
 	}
 	err = offcputime_bpf__attach(obj);
@@ -340,11 +336,11 @@ int main(int argc, char **argv)
 	 */
 	sleep(env.duration);
 
-	print_map(ksyms, syms_vec, obj);
+	print_map(ksyms, syms_cache, obj);
 
 cleanup:
 	offcputime_bpf__destroy(obj);
-	syms_vec__free(syms_vec);
+	syms_cache__free(syms_cache);
 	ksyms__free(ksyms);
 	return err != 0;
 }
