@@ -13,9 +13,9 @@
 #include <sys/resource.h>
 #include <time.h>
 #include <limits.h>
+#include <bpf/btf.h>
 #include "trace_helpers.h"
 #include "uprobe_helpers.h"
-#include "strset.h"
 
 #define min(x, y) ({				\
 	typeof(x) _min1 = (x);			\
@@ -190,8 +190,6 @@ enum elf_type {
 	UNKNOWN,
 };
 
-#define MAX_STR_OFFSET 0x7fffffffU
-
 struct dso {
 	char *name;
 	struct load_range *ranges;
@@ -205,7 +203,13 @@ struct dso {
 	struct sym *syms;
 	int syms_sz;
 	int syms_cap;
-	struct strset *strs_set;
+
+	/*
+	 * libbpf's struct btf is actually a pretty efficient
+	 * "set of strings" data structure, so we create an
+	 * empty one and use it to store symbol names.
+	 */
+	struct btf *btf;
 };
 
 struct map {
@@ -237,23 +241,6 @@ static bool is_file_backed(const char *mapname)
 		STARTS_WITH(mapname, "[vsyscall]"));
 }
 
-static int get_elf_type(const char *path)
-{
-	GElf_Ehdr hdr;
-	void *res;
-	Elf *e;
-	int fd;
-
-	e = open_elf(path, &fd);
-	if (!e)
-		return -1;
-	res = gelf_getehdr(e, &hdr);
-	close_elf(e, fd);
-	if (!res)
-		return -1;
-	return hdr.e_type;
-}
-
 static bool is_perf_map(const char *path)
 {
 	return false;
@@ -262,6 +249,25 @@ static bool is_perf_map(const char *path)
 static bool is_vdso(const char *path)
 {
 	return !strcmp(path, "[vdso]");
+}
+
+static int get_elf_type(const char *path)
+{
+	GElf_Ehdr hdr;
+	void *res;
+	Elf *e;
+	int fd;
+
+	if (is_vdso(path))
+		return -1;
+	e = open_elf(path, &fd);
+	if (!e)
+		return -1;
+	res = gelf_getehdr(e, &hdr);
+	close_elf(e, fd);
+	if (!res)
+		return -1;
+	return hdr.e_type;
 }
 
 static int get_elf_text_scn_info(const char *path, uint64_t *addr,
@@ -322,7 +328,7 @@ static int syms__add_dso(struct syms *syms, struct map *map, const char *name)
 		dso = &syms->dsos[syms->dso_sz++];
 		memset(dso, 0, sizeof(*dso));
 		dso->name = strdup(name);
-		dso->strs_set = strset__new(MAX_STR_OFFSET, NULL, 0);
+		dso->btf = btf__new_empty();
 	}
 
 	tmp = realloc(dso->ranges, (dso->range_sz + 1) * sizeof(*dso->ranges));
@@ -392,7 +398,7 @@ static int dso__add_sym(struct dso *dso, const char *name, uint64_t start,
 	void *tmp;
 	int off;
 
-	off = strset__add_str(dso->strs_set, name);
+	off = btf__add_str(dso->btf, name);
 	if (off < 0)
 		return off;
 
@@ -407,7 +413,7 @@ static int dso__add_sym(struct dso *dso, const char *name, uint64_t start,
 		dso->syms_cap = new_cap;
 	}
 
-	sym = &dso->syms[dso->syms_sz];
+	sym = &dso->syms[dso->syms_sz++];
 	/* while constructing, re-use pointer as just a plain offset */
 	sym->name = (void*)(unsigned long)off;
 	sym->start = start;
@@ -469,8 +475,7 @@ static void dso__free_fields(struct dso *dso)
 	free(dso->name);
 	free(dso->ranges);
 	free(dso->syms);
-	strset__free(dso->strs_set);
-
+	btf__free(dso->btf);
 }
 
 static int dso__load_sym_table_from_elf(struct dso *dso, int fd)
@@ -500,7 +505,9 @@ static int dso__load_sym_table_from_elf(struct dso *dso, int fd)
 
 	/* now when strings are finalized, adjust pointers properly */
 	for (i = 0; i < dso->syms_sz; i++)
-		dso->syms[i].name += (unsigned long)strset__data(dso->strs_set);
+		dso->syms[i].name =
+			btf__name_by_offset(dso->btf,
+					    (unsigned long)dso->syms[i].name);
 
 	qsort(dso->syms, dso->syms_sz, sizeof(*dso->syms), sym_cmp);
 
