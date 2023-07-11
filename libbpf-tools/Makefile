@@ -72,6 +72,7 @@ APPS = \
 	runqlen \
 	runqslower \
 	sigsnoop \
+    skwm \
 	slabratetop \
 	softirqs \
 	solisten \
