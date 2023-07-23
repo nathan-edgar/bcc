@@ -111,7 +111,7 @@ int futex_exit(struct trace_event_raw_sys_enter *ctx)
 	__sync_fetch_and_add(&histp->contended, 1);
 	__sync_fetch_and_add(&histp->total_elapsed, delta);
 	min = __sync_fetch_and_add(&histp->min, 0);
-	if (min > delta)
+	if (!min || min > delta)
 		__sync_val_compare_and_swap(&histp->min, min, delta);
 	max = __sync_fetch_and_add(&histp->max, 0);
 	if (max < delta)
