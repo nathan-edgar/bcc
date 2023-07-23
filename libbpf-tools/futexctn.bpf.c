@@ -71,8 +71,8 @@ int futex_enter(struct trace_event_raw_sys_enter *ctx)
 SEC("tracepoint/syscalls/sys_exit_futex")
 int futex_exit(struct trace_event_raw_sys_enter *ctx)
 {
+	u64 pid_tgid, slot, ts, min, max;
 	struct hist_key hkey = {};
-	u64 pid_tgid, slot, ts;
 	struct hist *histp;
 	struct val_t *vp;
 	s64 delta;
@@ -110,6 +110,12 @@ int futex_exit(struct trace_event_raw_sys_enter *ctx)
 	__sync_fetch_and_add(&histp->slots[slot], 1);
 	__sync_fetch_and_add(&histp->contended, 1);
 	__sync_fetch_and_add(&histp->total_elapsed, delta);
+	min = __sync_fetch_and_add(&histp->min, 0);
+	if (min > delta)
+		__sync_val_compare_and_swap(&histp->min, min, delta);
+	max = __sync_fetch_and_add(&histp->max, 0);
+	if (max < delta)
+		__sync_val_compare_and_swap(&histp->max, max, delta);
 	bpf_get_current_comm(&histp->comm, sizeof(histp->comm));
 
 cleanup:

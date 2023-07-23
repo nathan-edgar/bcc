@@ -15,7 +15,9 @@ struct hist {
 	__u32 slots[MAX_SLOTS];
 	char comm[TASK_COMM_LEN];
 	__u64 contended;
-	__u64 total_elapsed;
+        __u64 total_elapsed;
+	__u64 min;
+	__u64 max;
 };
 
 #endif // FUTEXCTN_H_

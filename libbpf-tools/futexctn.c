@@ -217,9 +217,9 @@ static int print_map(struct futexctn_bpf *obj)
 			return -1;
 		}
 		printf("\n\n");
-		printf("%s[%u] lock 0x%llx contended %llu times, %llu avg %s\n",
+		printf("%s[%u] lock 0x%llx contended %llu times, %llu avg %s [max: %llu %s, min %llu %s]n",
 			hist.comm, (__u32)next_key.pid_tgid, next_key.uaddr, hist.contended,
-			hist.total_elapsed / hist.contended, units);
+			hist.total_elapsed / hist.contended, units, hist.max, units, hist.min, units);
 		printf("    -\n");
 		print_stack(obj, &next_key);
 		printf("    -\n");
