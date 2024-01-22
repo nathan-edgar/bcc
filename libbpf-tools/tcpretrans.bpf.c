@@ -16,6 +16,7 @@
 #include <bpf/bpf_core_read.h>
 #include <bpf/bpf_tracing.h>
 
+#include "compat.bpf.h"
 #include "maps.bpf.h"
 #include "tcpretrans.h"
 
@@ -24,12 +25,6 @@
 #define AF_INET6	10
 
 const volatile bool do_count = false;
-
-struct {
-	__uint(type, BPF_MAP_TYPE_PERF_EVENT_ARRAY);
-	__uint(key_size, sizeof(u32));
-	__uint(value_size, sizeof(u32));
-} events SEC(".maps");
 
 struct {
 	__uint(type, BPF_MAP_TYPE_HASH);
@@ -82,17 +77,15 @@ static void count_v6(const struct sock *skp)
 
 static int trace_event(void *ctx, const struct sock *skp, int type)
 {
-	struct event e = {};
+	struct event *e;
 	__u32 family;
 	__u64 pid_tgid;
 	__u32 pid;
-	int state;
 
 	if (skp == NULL)
 		return 0;
 
 	family = BPF_CORE_READ(skp, __sk_common.skc_family);
-	e.af = family;
 
 	if (do_count) {
 		if (family == AF_INET)
@@ -102,25 +95,31 @@ static int trace_event(void *ctx, const struct sock *skp, int type)
 		return 0;
 	}
 
-	e.type = type;
+	e = reserve_buf(sizeof(*e));
+        if (!e)
+                return 0;
+
+	e->af = family;
+	e->type = type;
 	pid_tgid = bpf_get_current_pid_tgid();
 	pid = pid_tgid >> 32;
-	e.pid = pid;
+	e->pid = pid;
 
-	BPF_CORE_READ_INTO(&e.dport, skp, __sk_common.skc_dport);
-	BPF_CORE_READ_INTO(&e.sport, skp, __sk_common.skc_num);
-	e.state = BPF_CORE_READ(skp, __sk_common.skc_state);
+	BPF_CORE_READ_INTO(&e->dport, skp, __sk_common.skc_dport);
+	BPF_CORE_READ_INTO(&e->sport, skp, __sk_common.skc_num);
+	e->state = BPF_CORE_READ(skp, __sk_common.skc_state);
 
 	if (family == AF_INET) {
-		BPF_CORE_READ_INTO(&e.saddr, skp, __sk_common.skc_rcv_saddr);
-		BPF_CORE_READ_INTO(&e.daddr, skp, __sk_common.skc_daddr);
+		BPF_CORE_READ_INTO(&e->saddr, skp, __sk_common.skc_rcv_saddr);
+		BPF_CORE_READ_INTO(&e->daddr, skp, __sk_common.skc_daddr);
 	} else if (family == AF_INET6) {
-		BPF_CORE_READ_INTO(&e.saddr, skp,
+		BPF_CORE_READ_INTO(&e->saddr, skp,
 				   __sk_common.skc_v6_rcv_saddr.in6_u.u6_addr32);
-		BPF_CORE_READ_INTO(&e.daddr, skp,
+		BPF_CORE_READ_INTO(&e->daddr, skp,
 				   __sk_common.skc_v6_daddr.in6_u.u6_addr32);
 	}
-	bpf_perf_event_output(ctx, &events, BPF_F_CURRENT_CPU, &e, sizeof(e));
+
+	submit_buf(ctx, e, sizeof(*e));
 	return 0;
 }
 

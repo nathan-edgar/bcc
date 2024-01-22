@@ -17,7 +17,10 @@
 #include <limits.h>
 #include <unistd.h>
 #include <time.h>
+
 #include <bpf/bpf.h>
+#include <bpf/libbpf.h>
+#include "compat.h"
 #include "tcpretrans.h"
 #include "tcpretrans.skel.h"
 #include "trace_helpers.h"
@@ -190,7 +193,7 @@ static void print_events_header()
 		"LADDR:LPORT", "T", "RADDR:RPORT", "STATE");
 }
 
-static void handle_event(void *ctx, int cpu, void *data, __u32 data_sz)
+static int handle_event(void *ctx, void *data, size_t data_sz)
 {
 	const struct event *e = data;
 	struct tm *tm;
@@ -214,7 +217,7 @@ static void handle_event(void *ctx, int cpu, void *data, __u32 data_sz)
 		memcpy(&d.x6.s6_addr, e->daddr, sizeof(d.x6.s6_addr));
 	} else {
 		warn("broken event: event->af=%d", e->af);
-		return;
+		return -1;
 	}
 
 	time(&t);
@@ -224,14 +227,10 @@ static void handle_event(void *ctx, int cpu, void *data, __u32 data_sz)
 	sprintf(local, "%s:%d", inet_ntop(e->af, &s, src, sizeof(src)), e->sport);
 	sprintf(remote, "%s:%d", inet_ntop(e->af, &d, dst, sizeof(dst)), dport);
 
-	printf("%-8s %-6d %-2d %-20s %1s> %-20s %s\n",
-		   ts,
-		   e->pid,
-		   e->af == AF_INET ? 4 : 6,
-		   local,
-		   e->type == RETRANSMIT ? "R" : "L",
-		   remote,
-		   TCPSTATE[e->state]);
+	printf("%-8s %-6d %-2d %-20s %1s> %-20s %s\n", ts, e->pid,
+               e->af == AF_INET ? 4 : 6, local,
+               e->type == RETRANSMIT ? "R" : "L", remote, TCPSTATE[e->state]);
+	return 0;
 }
 
 static void handle_lost_events(void *ctx, int cpu, __u64 lost_cnt)
@@ -239,34 +238,34 @@ static void handle_lost_events(void *ctx, int cpu, __u64 lost_cnt)
 	warn("Lost %llu events on CPU #%d!\n", lost_cnt, cpu);
 }
 
-static void print_events(int perf_map_fd)
+static void print_events(struct tcpretrans_bpf *obj)
 {
-	struct perf_buffer_opts pb_opts = {
-		.sample_cb = handle_event,
-		.lost_cb = handle_lost_events,
-	};
-	struct perf_buffer *pb = NULL;
-	int err;
+	struct bpf_buffer *buf = NULL;
+        int err;
 
-	pb = perf_buffer__new(perf_map_fd, 128, &pb_opts);
-	err = libbpf_get_error(pb);
+	buf = bpf_buffer__new(obj->maps.events, obj->maps.heap);
+	if (!buf) {
+		err = -errno;
+		fprintf(stderr, "failed to create ring/perf buffer: %d\n", err);
+		goto cleanup;
+	}
+	err = bpf_buffer__open(buf, handle_event, handle_lost_events, NULL);
 	if (err) {
-		pb = NULL;
-		warn("failed to open perf buffer: %d\n", err);
+		fprintf(stderr, "failed to open ring/perf buffer: %d\n", err);
 		goto cleanup;
 	}
 
 	print_events_header();
 	while (!exiting) {
-		err = perf_buffer__poll(pb, 100);
-		if (err < 0 && errno != EINTR) {
+		err = bpf_buffer__poll(buf, POLL_TIMEOUT_MS);
+                if (err < 0 && errno != EINTR) {
 			warn("Error polling perf buffer: %d\n", err);
-			goto cleanup;
+			break;
 		}
-	}
+        }
 
 cleanup:
-	perf_buffer__free(pb);
+	bpf_buffer__free(buf);
 }
 
 int main(int argc, char **argv)
@@ -277,7 +276,6 @@ int main(int argc, char **argv)
 		.doc = argp_program_doc,
 		.args_doc = NULL,
 	};
-
 	struct tcpretrans_bpf *obj;
 	int err, tpmissing;
 
@@ -286,12 +284,6 @@ int main(int argc, char **argv)
 		return err;
 
 	libbpf_set_print(libbpf_print_fn);
-
-	err = bump_memlock_rlimit();
-	if (err) {
-		warn("failed to increase rlimit: %s\n", strerror(errno));
-		return 1;
-	}
 
 	obj = tcpretrans_bpf__open();
 	if (!obj) {
@@ -353,8 +345,8 @@ int main(int argc, char **argv)
 	if (env.count) {
 		print_count(bpf_map__fd(obj->maps.ipv4_count),
 			bpf_map__fd(obj->maps.ipv6_count));
-	} else {
-		print_events(bpf_map__fd(obj->maps.events));
+        } else {
+		print_events(obj);
 	}
 
 cleanup:
